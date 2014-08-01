@@ -148,7 +148,10 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
       }
     if (other.isEmpty) this
     else if (this.isEmpty) other
-    else go(this, other, false)
+    else this match {
+      case b@Buffer(_,_,_) => b.snoc(other)
+      case _ => go(this, other, false)
+    }
   }
 
   /**
@@ -565,6 +568,14 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * @group conversions
    */
   final def bits: BitVector = toBitVector
+
+  /**
+   * Allocate (unobservable) mutable scratch space at the end of this
+   * `ByteVector`, which will be used to support efficient `++` of
+   * small vectors.
+   */
+  final def buffer(initialCapacity: Int): ByteVector =
+    Buffer(new AtomicLong(0), this, Tail(0, new Array[Byte](initialCapacity), 0))
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -1241,29 +1252,52 @@ object ByteVector {
     def readResolve: AnyRef = ByteVector.view(bytes)
   }
 
-  case class Buffer(id: AtomicLong, hd: ByteVector, tl: Tail) extends ByteVector {
+  private case class Buffer(id: AtomicLong, hd: ByteVector, tl: Tail) extends ByteVector {
     def size = hd.size + tl.size
+    def snoc(bs: ByteVector) = {
+      val cur = id.get
+      // threads race to increment id, winner gets to update tl mutably
+      if (id.compareAndSet(cur, cur+1) && tl.id == cur)
+        tl.snoc(id, hd, cur+1, bs)
+      else // losers copy to a fresh ByteVector
+        (hd ++ ByteVector(tl.bytes.take(tl.size)) ++ bs)
+    }
     def snoc(b: Byte) = {
       val cur = id.get
       // threads race to increment id, winner gets to update tl mutably
       if (id.compareAndSet(cur, cur+1) && tl.id == cur)
-        Buffer(id, hd, tl.snoc(cur+1, b))
+        tl.snoc(id, hd, cur+1, b)
       else // losers copy to a fresh ByteVector
         (hd ++ ByteVector(tl.bytes.take(tl.size)) :+ b)
     }
     def freeze: ByteVector = hd ++ tl.toByteVector
   }
 
-  case class Tail(id: Long, bytes: Array[Byte], size: Int) {
-    def snoc(id: Long, b: Byte): Tail =
-      if (size >= bytes.length)
-        Tail(id, bytes ++ new Array[Byte](size), size).snoc(id, b)
+  private case class Tail(id: Long, bytes: Array[Byte], size: Int) {
+    def snoc(stamp: AtomicLong, hd: ByteVector, id: Long, bs: ByteVector): ByteVector =
+      if (size >= 16384) (hd ++ ByteVector(bytes).take(size)).buffer(1024)
+      else if (size + bs.size > bytes.length)
+        Tail(id, bytes ++ new Array[Byte](size), size).snoc(stamp, hd, id, bs)
       else {
-        bytes(size) = b; Tail(id, bytes, size + 1)
+        if (bs.size > 64) (hd ++ toByteVector).buffer(1024)
+        else {
+          var i = size
+          bs.foreachS { new F1BU { def apply(b: Byte) = { bytes(i) = b; i += 1 } } }
+          Buffer(stamp, hd, Tail(id, bytes, size + bs.size))
+        }
       }
+    def snoc(stamp: AtomicLong, hd: ByteVector, id: Long, b: Byte): ByteVector =
+      if (size >= 16384) hd ++ ByteVector(bytes).take(size)
+      else if (size >= bytes.length)
+        Tail(id, bytes ++ new Array[Byte](size), size).snoc(stamp, hd, id, b)
+      else {
+        bytes(size) = b; Buffer(stamp, hd, Tail(id, bytes, size + 1))
+      }
+
     def toByteVector =
       if (size == bytes.size) ByteVector(bytes)
       else ByteVector(bytes.take(size))
+
     def view = ByteVector.view(bytes, size)
   }
 }
