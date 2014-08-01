@@ -5,6 +5,7 @@ import java.nio.ByteBuffer
 import java.security.MessageDigest
 import scala.collection.GenTraversableOnce
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * An immutable vector of bytes, backed by a balanced binary tree of
@@ -68,6 +69,9 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
       case Append(l,r) => if (n < l.size) go(l, n)
                           else go(r, n-l.size)
       case Chunk(arr) => arr(n)
+      case Buffer(_, hd, tl) =>
+        if (n < hd.size) go(hd, n)
+        else tl.bytes(n - hd.size)
     }
     go(this, index)
   }
@@ -177,6 +181,9 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
           case Chunk(bs) => accR.foldLeft(Chunk(bs.drop(n1)): ByteVector)(_ ++ _)
           case Append(l,r) => if (n1 > l.size) go(r, n1-l.size, accR)
                               else go(l, n1, r :: accR)
+          case b@Buffer(id,hd,tl) =>
+            if (n1 > hd.size) go(b.freeze, n1, accR)
+            else accR.foldLeft(Buffer(id, hd.drop(n1), tl): ByteVector)(_ ++ _)
         }
       go(this, n1, Nil)
     }
@@ -211,6 +218,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
         case Chunk(bs) => accL.foldLeft(Chunk(bs.take(n1)): ByteVector)((r,l) => l ++ r)
         case Append(l,r) => if (n1 > l.size) go(l :: accL, r, n1-l.size)
                             else go(accL, l, n1)
+        case b@Buffer(_,_,_) => go(accL, b.freeze, n1)
       }
       go(Nil, this, n1)
     }
@@ -298,6 +306,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     def go(rem: List[ByteVector]): Unit = if (!rem.isEmpty) rem.head match {
       case Chunk(bs) => f(bs); go(rem.tail)
       case Append(l,r) => go(l::r::rem.tail)
+      case Buffer(_,hd,tl) => go(hd::tl.view::rem.tail)
     }
     go(this::Nil)
   }
@@ -957,6 +966,13 @@ object ByteVector {
     view(bs.toArray[Byte])
 
   /**
+   * Construct an empty `ByteVector` with `initialCapacity` mutable
+   * scratch space at the tail.
+   */
+  def buffer(initialCapacity: Int): ByteVector =
+    Buffer(new AtomicLong(0), ByteVector.empty, Tail(0, new Array[Byte](initialCapacity), 0))
+
+  /**
    * Constructs a `ByteVector` from an `Array[Byte]`. Unlike `apply`, this
    * does not make a copy of the input array, so callers should take care
    * not to modify the contents of the array passed to this function.
@@ -1224,4 +1240,31 @@ object ByteVector {
   private class SerializationProxy(private val bytes: Array[Byte]) extends Serializable {
     def readResolve: AnyRef = ByteVector.view(bytes)
   }
+
+  case class Buffer(id: AtomicLong, hd: ByteVector, tl: Tail) extends ByteVector {
+    def size = hd.size + tl.size
+    def snoc(b: Byte) = {
+      val cur = id.get
+      // threads race to increment id, winner gets to update tl mutably
+      if (id.compareAndSet(cur, cur+1) && tl.id == cur)
+        Buffer(id, hd, tl.snoc(cur+1, b))
+      else // losers copy to a fresh ByteVector
+        (hd ++ ByteVector(tl.bytes.take(tl.size)) :+ b)
+    }
+    def freeze: ByteVector = hd ++ tl.toByteVector
+  }
+
+  case class Tail(id: Long, bytes: Array[Byte], size: Int) {
+    def snoc(id: Long, b: Byte): Tail =
+      if (size >= bytes.length)
+        Tail(id, bytes ++ new Array[Byte](size), size).snoc(id, b)
+      else {
+        bytes(size) = b; Tail(id, bytes, size + 1)
+      }
+    def toByteVector =
+      if (size == bytes.size) ByteVector(bytes)
+      else ByteVector(bytes.take(size))
+    def view = ByteVector.view(bytes, size)
+  }
 }
+
