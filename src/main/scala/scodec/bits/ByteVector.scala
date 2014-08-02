@@ -147,10 +147,11 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
         case _ => Append(x, y)
       }
     if (other.isEmpty) this
-    else if (this.isEmpty) other
     else this match {
       case b@Buffer(_,_,_) => b.snoc(other)
-      case _ => go(this, other, false)
+      case _ =>
+        if (this.isEmpty) other
+        else go(this, other, false)
     }
   }
 
@@ -1271,18 +1272,18 @@ object ByteVector {
         (hd ++ ByteVector(tl.bytes.take(tl.size)) :+ b)
     }
     def freeze: ByteVector = hd ++ tl.toByteVector
+    // override def pretty(s: String) = s + s"Buffer(${id.get}, $hd, $tl)"
   }
 
   private case class Tail(id: Long, bytes: Array[Byte], size: Int) {
     def snoc(stamp: AtomicLong, hd: ByteVector, id: Long, bs: ByteVector): ByteVector =
-      if (size >= 16384) (hd ++ ByteVector(bytes).take(size)).buffer(1024)
+      if (size >= 16384) (hd ++ ByteVector(bytes).take(size) ++ bs).buffer(1024)
       else if (size + bs.size > bytes.length)
         Tail(id, bytes ++ new Array[Byte](size), size).snoc(stamp, hd, id, bs)
       else {
         if (bs.size > 64) (hd ++ toByteVector).buffer(1024)
         else {
-          var i = size
-          bs.foreachS { new F1BU { def apply(b: Byte) = { bytes(i) = b; i += 1 } } }
+          bs.copyToArray(bytes, size)
           Buffer(stamp, hd, Tail(id, bytes, size + bs.size))
         }
       }
