@@ -69,9 +69,9 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
       case Append(l,r) => if (n < l.size) go(l, n)
                           else go(r, n-l.size)
       case Chunk(arr) => arr(n)
-      case Buffer(_, hd, tl) =>
+      case Buffer(_, _, hd, tl) =>
         if (n < hd.size) go(hd, n)
-        else tl.bytes(n - hd.size)
+        else tl.get(n - hd.size)
     }
     go(this, index)
   }
@@ -148,7 +148,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
       }
     if (other.isEmpty) this
     else this match {
-      case b@Buffer(_,_,_) => b.snoc(other)
+      case b@Buffer(_,_,_,_) => b.snoc(other)
       case _ =>
         if (this.isEmpty) other
         else go(this, other, false)
@@ -185,9 +185,9 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
           case Chunk(bs) => accR.foldLeft(Chunk(bs.drop(n1)): ByteVector)(_ ++ _)
           case Append(l,r) => if (n1 > l.size) go(r, n1-l.size, accR)
                               else go(l, n1, r :: accR)
-          case b@Buffer(id,hd,tl) =>
+          case b@Buffer(id,stamp,hd,tl) =>
             if (n1 > hd.size) go(b.freeze, n1, accR)
-            else accR.foldLeft(Buffer(id, hd.drop(n1), tl): ByteVector)(_ ++ _)
+            else accR.foldLeft(Buffer(id, stamp, hd.drop(n1), tl): ByteVector)(_ ++ _)
         }
       go(this, n1, Nil)
     }
@@ -222,7 +222,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
         case Chunk(bs) => accL.foldLeft(Chunk(bs.take(n1)): ByteVector)((r,l) => l ++ r)
         case Append(l,r) => if (n1 > l.size) go(l :: accL, r, n1-l.size)
                             else go(accL, l, n1)
-        case b@Buffer(_,_,_) => go(accL, b.freeze, n1)
+        case b@Buffer(_,_,_,_) => go(accL, b.freeze, n1)
       }
       go(Nil, this, n1)
     }
@@ -310,7 +310,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     def go(rem: List[ByteVector]): Unit = if (!rem.isEmpty) rem.head match {
       case Chunk(bs) => f(bs); go(rem.tail)
       case Append(l,r) => go(l::r::rem.tail)
-      case Buffer(_,hd,tl) => go(hd::tl.view::rem.tail)
+      case Buffer(_,_,hd,tl) => go(hd::tl.view::rem.tail)
     }
     go(this::Nil)
   }
@@ -576,7 +576,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * small vectors.
    */
   final def buffer(initialCapacity: Int): ByteVector =
-    Buffer(new AtomicLong(0), this, Tail(0, new Array[Byte](initialCapacity), 0))
+    Buffer(new AtomicLong(0), 0, this, Tail(new collection.mutable.ArrayBuffer, new Array[Byte](initialCapacity), 0, 0))
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -982,7 +982,8 @@ object ByteVector {
    * scratch space at the tail.
    */
   def buffer(initialCapacity: Int): ByteVector =
-    Buffer(new AtomicLong(0), ByteVector.empty, Tail(0, new Array[Byte](initialCapacity), 0))
+    Buffer(new AtomicLong(0), 0, ByteVector.empty, Tail(new collection.mutable.ArrayBuffer, new
+    Array[Byte](initialCapacity), 0, 0))
 
   /**
    * Constructs a `ByteVector` from an `Array[Byte]`. Unlike `apply`, this
@@ -1253,53 +1254,77 @@ object ByteVector {
     def readResolve: AnyRef = ByteVector.view(bytes)
   }
 
-  private case class Buffer(id: AtomicLong, hd: ByteVector, tl: Tail) extends ByteVector {
+  private case class Buffer(id: AtomicLong, stamp: Long, hd: ByteVector, tl: Tail) extends ByteVector {
     def size = hd.size + tl.size
     def snoc(bs: ByteVector) = {
-      val cur = id.get
       // threads race to increment id, winner gets to update tl mutably
-      if (id.compareAndSet(cur, cur+1) && tl.id == cur)
-        tl.snoc(id, hd, cur+1, bs)
+      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
+        tl.snoc(bs)
+        Buffer(id, stamp+1, hd, tl)
+      }
       else // losers copy to a fresh ByteVector
-        (hd ++ ByteVector(tl.bytes.take(tl.size)) ++ bs)
+        (hd ++ tl.toByteVector ++ bs).buffer(tl.lastChunk.length)
     }
     def snoc(b: Byte) = {
-      val cur = id.get
       // threads race to increment id, winner gets to update tl mutably
-      if (id.compareAndSet(cur, cur+1) && tl.id == cur)
-        tl.snoc(id, hd, cur+1, b)
+      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
+        tl.snoc(b)
+        Buffer(id, stamp+1, hd, tl)
+      }
       else // losers copy to a fresh ByteVector
-        (hd ++ ByteVector(tl.bytes.take(tl.size)) :+ b)
+        (hd ++ tl.toByteVector :+ b).buffer(tl.lastChunk.length)
     }
     def freeze: ByteVector = hd ++ tl.toByteVector
     // override def pretty(s: String) = s + s"Buffer(${id.get}, $hd, $tl)"
   }
 
-  private case class Tail(id: Long, bytes: Array[Byte], size: Int) {
-    def snoc(stamp: AtomicLong, hd: ByteVector, id: Long, bs: ByteVector): ByteVector =
-      if (size >= 16384) (hd ++ ByteVector(bytes).take(size) ++ bs).buffer(1024)
-      else if (size + bs.size > bytes.length)
-        Tail(id, bytes ++ new Array[Byte](size), size).snoc(stamp, hd, id, bs)
-      else {
-        if (bs.size > 64) (hd ++ toByteVector).buffer(1024)
-        else {
-          bs.copyToArray(bytes, size)
-          Buffer(stamp, hd, Tail(id, bytes, size + bs.size))
-        }
+  private case class Tail(chunks: collection.mutable.ArrayBuffer[ByteVector], lastChunk: Array[Byte],
+                          var size: Int,
+                          var lastSize: Int) {
+    def snoc(bs: ByteVector): Unit =
+      bs.foreachS { new F1BU { def apply(b: Byte) = snoc(b) } }
+
+    //{
+    //  if (bs.size > lastChunk.length - lastSize) {
+    //    val chunk = ByteVector(lastChunk).take(lastSize) ++ bs
+    //    lastSize = 0
+    //    val groups = chunk.grouped(lastChunk.length)
+    //    groups.foreach { chunk =>
+    //      if (chunk.size == lastChunk.size)
+    //        chunks += chunk
+    //      else {
+    //        chunk.copyToArray(lastChunk, 0)
+    //        lastSize = lastChunk.length - chunk.size
+    //      }
+    //    }
+    //  }
+    //  else {
+    //    bs.copyToArray(lastChunk, lastSize)
+    //    lastSize = lastSize + bs.size
+    //  }
+    //  size += bs.size
+    //}
+    def snoc(b: Byte): Unit = {
+      if (lastSize == lastChunk.length) {
+        chunks += ByteVector(lastChunk)
+        lastSize = 0
       }
-    def snoc(stamp: AtomicLong, hd: ByteVector, id: Long, b: Byte): ByteVector =
-      if (size >= 16384) hd ++ ByteVector(bytes).take(size)
-      else if (size >= bytes.length)
-        Tail(id, bytes ++ new Array[Byte](size), size).snoc(stamp, hd, id, b)
-      else {
-        bytes(size) = b; Buffer(stamp, hd, Tail(id, bytes, size + 1))
-      }
+      lastChunk(lastSize) = b
+      lastSize += 1
+      size += 1
+    }
+
+    def get(i: Int): Byte = {
+      val bin = i / lastChunk.length
+      if (bin <= chunks.length) chunks(bin).get(i % lastChunk.length)
+      else lastChunk(i)
+    }
 
     def toByteVector =
-      if (size == bytes.size) ByteVector(bytes)
-      else ByteVector(bytes.take(size))
+      chunks.foldLeft(ByteVector.empty)(_ ++ _) ++ ByteVector(lastChunk).take(lastSize)
 
-    def view = ByteVector.view(bytes, size)
+    def view =
+      chunks.foldLeft(ByteVector.empty)(_ ++ _) ++ ByteVector.view(lastChunk).take(lastSize)
   }
 }
 
