@@ -1285,28 +1285,18 @@ object ByteVector {
                           var size: Int,
                           var lastSize: Int) {
     def snoc(bs: ByteVector): Unit =
-      bs.foreachS { new F1BU { def apply(b: Byte) = snoc(b) } }
+      bs.foreachV { view =>
+        // TODO: special case - lastSize is 0, and bs is larger than chunk size,
+        // go ahead and add the chunk directly to chunks, rather than doing extra copy
+        val rem = lastChunk.size - lastSize
+        if (view.size <= rem) {
+          view.copyToArray(lastChunk, lastSize)
+          lastSize += view.size
+        }
+        else
+          view.foreach { new F1BU { def apply(b: Byte) = snoc(b) } }
+      }
 
-    //{
-    //  if (bs.size > lastChunk.length - lastSize) {
-    //    val chunk = ByteVector(lastChunk).take(lastSize) ++ bs
-    //    lastSize = 0
-    //    val groups = chunk.grouped(lastChunk.length)
-    //    groups.foreach { chunk =>
-    //      if (chunk.size == lastChunk.size)
-    //        chunks += chunk
-    //      else {
-    //        chunk.copyToArray(lastChunk, 0)
-    //        lastSize = lastChunk.length - chunk.size
-    //      }
-    //    }
-    //  }
-    //  else {
-    //    bs.copyToArray(lastChunk, lastSize)
-    //    lastSize = lastSize + bs.size
-    //  }
-    //  size += bs.size
-    //}
     def snoc(b: Byte): Unit = {
       if (lastSize == lastChunk.length) {
         chunks += ByteVector(lastChunk)
