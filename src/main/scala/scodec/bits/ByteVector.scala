@@ -165,7 +165,8 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * Returns a new vector with the specified byte appended.
    * @group collection
    */
-  final def :+(byte: Byte): ByteVector = this ++ ByteVector(byte)
+  def :+(byte: Byte): ByteVector =
+    this ++ ByteVector(byte)
 
   /**
    * Returns a vector of all bytes in this vector except the first `n` bytes.
@@ -1256,6 +1257,8 @@ object ByteVector {
 
   private case class Buffer(id: AtomicLong, stamp: Long, hd: ByteVector, tl: Tail) extends ByteVector {
     def size = hd.size + tl.size
+    override def :+(b: Byte) =
+      snoc(b)
     def snoc(bs: ByteVector) = {
       // threads race to increment id, winner gets to update tl mutably
       if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
