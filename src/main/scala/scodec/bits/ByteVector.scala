@@ -573,11 +573,18 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
 
   /**
    * Allocate (unobservable) mutable scratch space at the end of this
-   * `ByteVector`, which will be used to support efficient `++` of
-   * small vectors.
+   * `ByteVector`, which will be used to support fast `:+` and `++`
+   * of small vectors. A default chunk size is used.
    */
-  final def buffer(initialCapacity: Int): ByteVector =
-    Buffer(new AtomicLong(0), 0, this, Tail(new collection.mutable.ArrayBuffer, new Array[Byte](initialCapacity), 0, 0))
+  final def buffer: ByteVector = bufferOf(1024)
+
+  /**
+   * Allocate (unobservable) mutable scratch space at the end of this
+   * `ByteVector`, with chunks of the given size, which will be used to
+   * support fast `:+` and `++` of small vectors.
+   */
+  final def bufferOf(chunkSize: Int): ByteVector =
+    Buffer(new AtomicLong(0), 0, this, Tail(new collection.mutable.ArrayBuffer, new Array[Byte](chunkSize), 0, 0))
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -979,14 +986,6 @@ object ByteVector {
     view(bs.toArray[Byte])
 
   /**
-   * Construct an empty `ByteVector` with `initialCapacity` mutable
-   * scratch space at the tail.
-   */
-  def buffer(initialCapacity: Int): ByteVector =
-    Buffer(new AtomicLong(0), 0, ByteVector.empty, Tail(new collection.mutable.ArrayBuffer, new
-    Array[Byte](initialCapacity), 0, 0))
-
-  /**
    * Constructs a `ByteVector` from an `Array[Byte]`. Unlike `apply`, this
    * does not make a copy of the input array, so callers should take care
    * not to modify the contents of the array passed to this function.
@@ -1259,23 +1258,23 @@ object ByteVector {
     def size = hd.size + tl.size
     override def :+(b: Byte) =
       snoc(b)
-    def snoc(bs: ByteVector) = {
+    def snoc(bs: ByteVector): ByteVector = {
       // threads race to increment id, winner gets to update tl mutably
       if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
         tl.snoc(bs)
         Buffer(id, stamp+1, hd, tl)
       }
       else // losers copy to a fresh ByteVector
-        (hd ++ tl.toByteVector ++ bs).buffer(tl.lastChunk.length)
+        (hd ++ tl.toByteVector ++ bs).bufferOf(tl.lastChunk.length)
     }
-    def snoc(b: Byte) = {
+    def snoc(b: Byte): ByteVector = {
       // threads race to increment id, winner gets to update tl mutably
       if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
         tl.snoc(b)
         Buffer(id, stamp+1, hd, tl)
       }
       else // losers copy to a fresh ByteVector
-        (hd ++ tl.toByteVector :+ b).buffer(tl.lastChunk.length)
+        (hd ++ tl.toByteVector :+ b).bufferOf(tl.lastChunk.length)
     }
     def freeze: ByteVector = hd ++ tl.toByteVector
     // override def pretty(s: String) = s + s"Buffer(${id.get}, $hd, $tl)"
@@ -1284,18 +1283,39 @@ object ByteVector {
   private case class Tail(chunks: collection.mutable.ArrayBuffer[ByteVector], lastChunk: Array[Byte],
                           var size: Int,
                           var lastSize: Int) {
-    def snoc(bs: ByteVector): Unit =
-      bs.foreachV { view =>
-        // TODO: special case - lastSize is 0, and bs is larger than chunk size,
-        // go ahead and add the chunk directly to chunks, rather than doing extra copy
+    @annotation.tailrec
+    final def snoc(bs: ByteVector): Unit = {
+      if (bs.isEmpty) ()
+      else if (lastSize != 0) {
         val rem = lastChunk.size - lastSize
-        if (view.size <= rem) {
-          view.copyToArray(lastChunk, lastSize)
-          lastSize += view.size
+        val bsh = bs.take(rem)
+        bsh.copyToArray(lastChunk, lastSize)
+        size += bsh.size
+        lastSize += bsh.size
+        if (lastSize == lastChunk.length) {
+          lastSize = 0
+          chunks += ByteVector(lastChunk)
         }
-        else
-          view.foreach { new F1BU { def apply(b: Byte) = snoc(b) } }
+        snoc(bs.drop(rem))
       }
+      else {
+        if (bs.size > lastChunk.length) {
+          val hd = bs.take(lastChunk.length)
+          chunks += hd
+          size += lastChunk.length
+          snoc(bs.drop(lastChunk.length))
+        }
+        else {
+          size += bs.size
+          bs.copyToArray(lastChunk, 0)
+          lastSize += bs.size
+          if (lastSize == lastChunk.length) {
+            lastSize = 0
+            chunks += ByteVector(lastChunk)
+          }
+        }
+      }
+    }
 
     def snoc(b: Byte): Unit = {
       if (lastSize == lastChunk.length) {
