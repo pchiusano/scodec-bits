@@ -187,7 +187,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
           case Append(l,r) => if (n1 > l.size) go(r, n1-l.size, accR)
                               else go(l, n1, r :: accR)
           case b@Buffer(id,stamp,hd,tl) =>
-            if (n1 > hd.size) go(b.freeze, n1, accR)
+            if (n1 > hd.size) go(b.freeze, n1, accR) // todo: something smarter - only need to build up AFTER n
             else accR.foldLeft(Buffer(id, stamp, hd.drop(n1), tl): ByteVector)(_ ++ _)
         }
       go(this, n1, Nil)
@@ -223,7 +223,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
         case Chunk(bs) => accL.foldLeft(Chunk(bs.take(n1)): ByteVector)((r,l) => l ++ r)
         case Append(l,r) => if (n1 > l.size) go(l :: accL, r, n1-l.size)
                             else go(accL, l, n1)
-        case b@Buffer(_,_,_,_) => go(accL, b.freeze, n1)
+        case b@Buffer(_,_,_,_) => go(accL, b.freeze, n1) // todo: something smarter here, only build up BEFORE n
       }
       go(Nil, this, n1)
     }
@@ -584,7 +584,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * support fast `:+` and `++` of small vectors.
    */
   final def bufferOf(chunkSize: Int): ByteVector =
-    Buffer(new AtomicLong(0), 0, this, Tail(new collection.mutable.ArrayBuffer, new Array[Byte](chunkSize), 0, 0))
+    Buffer(new AtomicLong(0), 0, this, Tail(new collection.mutable.ArrayBuffer, new Array[Byte](chunkSize), 0))
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -1281,8 +1281,9 @@ object ByteVector {
   }
 
   private case class Tail(chunks: collection.mutable.ArrayBuffer[ByteVector], lastChunk: Array[Byte],
-                          var size: Int,
                           var lastSize: Int) {
+
+    def size = chunks.size * lastChunk.length + lastSize
     @annotation.tailrec
     final def snoc(bs: ByteVector): Unit = {
       if (bs.isEmpty) ()
@@ -1290,7 +1291,6 @@ object ByteVector {
         val rem = lastChunk.size - lastSize
         val bsh = bs.take(rem)
         bsh.copyToArray(lastChunk, lastSize)
-        size += bsh.size
         lastSize += bsh.size
         if (lastSize == lastChunk.length) {
           lastSize = 0
@@ -1302,11 +1302,9 @@ object ByteVector {
         if (bs.size > lastChunk.length) {
           val hd = bs.take(lastChunk.length)
           chunks += hd
-          size += lastChunk.length
           snoc(bs.drop(lastChunk.length))
         }
         else {
-          size += bs.size
           bs.copyToArray(lastChunk, 0)
           lastSize += bs.size
           if (lastSize == lastChunk.length) {
@@ -1324,7 +1322,6 @@ object ByteVector {
       }
       lastChunk(lastSize) = b
       lastSize += 1
-      size += 1
     }
 
     def get(i: Int): Byte = {
