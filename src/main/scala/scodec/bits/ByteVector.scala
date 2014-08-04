@@ -782,7 +782,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     else if (size < 512) s"ByteVector($size bytes, 0x${toHex})"
     else s"ByteVector($size bytes, #${hashCode})"
 
-  def pretty(prefix: String): String = this match {
+  private[scodec] def pretty(prefix: String): String = this match {
     case Append(l,r) => {
       val psub = prefix + "|  "
       prefix + "*" + "\n" +
@@ -1299,8 +1299,6 @@ object ByteVector {
 
     def take(accL: List[ByteVector], n: Int): ByteVector =
       accL.foldLeft(tl.take(id, stamp, n))((r,l) => l ++ r)
-
-    // override def pretty(s: String) = s + s"Buffer(${id.get}, $hd, $tl)"
   }
 
   // invariant: `chunks` is nonempty, all chunks except the first have size == lastChunk.length
