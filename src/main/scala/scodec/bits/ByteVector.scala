@@ -782,7 +782,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     else if (size < 512) s"ByteVector($size bytes, 0x${toHex})"
     else s"ByteVector($size bytes, #${hashCode})"
 
-  private[scodec] def pretty(prefix: String): String = this match {
+  def pretty(prefix: String): String = this match {
     case Append(l,r) => {
       val psub = prefix + "|  "
       prefix + "*" + "\n" +
@@ -1265,7 +1265,7 @@ object ByteVector {
    *    val b22 = b2 ++ baz
    *  }}}
    *
-   * We obviously cannot have both `b2` and `b3` mutably append to the same scratch
+   * we obviously cannot have both `b2` and `b3` mutably append to the same scratch
    * space, as `b3` would then overwrite what was written by `b2`. The solution
    * adopted here (see [1]) is to let `b2` write mutable to the buffer, but `b3`,
    * evaluated later, must make a copy.
@@ -1314,7 +1314,7 @@ object ByteVector {
 
     def address(i: Int): (Int,Int) = {
       val chN = chunks.head.size
-      if (i <= chN) (0,i)
+      if (i < chN) (0,i)
       else {
         val bin = (i - chN) / lastChunk.length + 1
         val localIndex = (i - chN) % lastChunk.length
@@ -1334,12 +1334,12 @@ object ByteVector {
 
     def take(id: AtomicLong, stamp: Long, n: Int): ByteVector = {
       val cs = chunkedSize
-      if (n <= cs) {
-        val (bin,j) = address(n)
-        val takenChunks = chunks.take(bin)
-        takenChunks.init.foldLeft(ByteVector.empty)(_ ++ _) ++
-        takenChunks.last.take(j+1)
-      }
+      if (n <= cs)
+        // why +2?
+        // first chunk may be empty, always take one extra chunk
+        // n may not be divisible by lastChunk.length (n = 9, chunk = 2),
+        //   and we want to 'round up' (n = 9, chunk size = 2 we need at least 5 chunks, not 4)
+        chunks.take(n/lastChunk.length + 2).foldLeft(ByteVector.empty)(_ ++ _).take(n)
       else
         Buffer(id, stamp, Tail(chunks, lastChunk, n - cs))
     }
@@ -1382,14 +1382,9 @@ object ByteVector {
       }
 
     def get(i: Int): Byte = {
-      val hN = chunks.head.size
-      if (i < hN) chunks.head(i)
-      else {
-        val j = i - hN
-        val bin = j / lastChunk.length
-        if (bin <= chunks.length) chunks(bin+1).get(j % lastChunk.length)
-        else lastChunk(j)
-      }
+      val (bin,j) = address(i)
+      if (bin == chunks.size) lastChunk(j)
+      else chunks(bin)(j)
     }
 
     def toByteVector =

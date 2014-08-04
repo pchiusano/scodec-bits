@@ -174,6 +174,45 @@ class ByteVectorTest extends BitsSuite {
     }
   }
 
+  test("buffer :+") {
+    forAll { (bs: List[ByteVector], n: Int) => {
+      val unbuf = bs.foldLeft(ByteVector.empty)(_ ++ _)
+      val buf = bs.foldLeft(ByteVector.empty.bufferBy((n % 1024).max(0) + 1))((acc,a) =>
+        a.foldLeft(acc)(_ :+ _)
+      )
+      unbuf shouldBe buf
+    }}
+  }
+
+  test("buffer ++/take/drop") {
+    forAll { (bs: List[ByteVector], n: Int) =>
+      val unbuf = bs.foldLeft(ByteVector.empty)(_ ++ _)
+      val buf = bs.foldLeft(ByteVector.empty.bufferBy((n % 1024).max(0) + 1))(_ ++ _)
+      unbuf shouldBe buf
+      val ind = (n % (unbuf.size+1)).max(0) + 1
+      buf.take(ind) shouldBe unbuf.take(ind)
+      buf.drop(ind) shouldBe unbuf.drop(ind)
+    }
+  }
+
+  test("buffer concurrency") {
+    import java.util.concurrent.Callable
+    val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+
+    // Concurrently append b1.buffer ++ b2 and b1.buffer ++ b3
+    // making sure this gives same results as unbuffered appends
+    forAll { (b1: ByteVector, b2: ByteVector, b3: ByteVector, n: Int) =>
+      val b1b = b1.bufferBy((n % 1024).max(0) + 1)
+      val b1b2 = new Callable[ByteVector] { def call = b1b ++ b2 }
+      val b1b3 = new Callable[ByteVector] { def call = b1b ++ b3 }
+      val rb1b2 = pool.submit(b1b2)
+      val rb1b3 = pool.submit(b1b3)
+      rb1b2.get shouldBe (b1 ++ b2)
+      rb1b3.get shouldBe (b1 ++ b3)
+    }
+    pool.shutdown
+  }
+
   test("<<") {
     ByteVector(0x55, 0x55, 0x55) << 1 shouldBe ByteVector(0xaa, 0xaa, 0xaa)
   }
