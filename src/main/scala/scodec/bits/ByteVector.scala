@@ -69,9 +69,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
       case Append(l,r) => if (n < l.size) go(l, n)
                           else go(r, n-l.size)
       case Chunk(arr) => arr(n)
-      case Buffer(_, _, hd, tl) =>
-        if (n < hd.size) go(hd, n)
-        else tl.get(n - hd.size)
+      case Buffer(_, _, tl) => tl.get(n)
     }
     go(this, index)
   }
@@ -148,7 +146,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
       }
     if (other.isEmpty) this
     else this match {
-      case b@Buffer(_,_,_,_) => b.snoc(other)
+      case b@Buffer(_,_,_) => b.snoc(other)
       case _ =>
         if (this.isEmpty) other
         else go(this, other, false)
@@ -186,9 +184,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
           case Chunk(bs) => accR.foldLeft(Chunk(bs.drop(n1)): ByteVector)(_ ++ _)
           case Append(l,r) => if (n1 > l.size) go(r, n1-l.size, accR)
                               else go(l, n1, r :: accR)
-          case b@Buffer(id,stamp,hd,tl) =>
-            if (n1 > hd.size) go(b.freeze, n1, accR) // todo: something smarter - only need to build up AFTER n
-            else accR.foldLeft(Buffer(id, stamp, hd.drop(n1), tl): ByteVector)(_ ++ _)
+          case b@Buffer(_,_,_) => b.drop(n1, accR)
         }
       go(this, n1, Nil)
     }
@@ -223,7 +219,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
         case Chunk(bs) => accL.foldLeft(Chunk(bs.take(n1)): ByteVector)((r,l) => l ++ r)
         case Append(l,r) => if (n1 > l.size) go(l :: accL, r, n1-l.size)
                             else go(accL, l, n1)
-        case b@Buffer(_,_,_,_) => go(accL, b.freeze, n1) // todo: something smarter here, only build up BEFORE n
+        case b@Buffer(_,_,_) => b.take(accL, n1)
       }
       go(Nil, this, n1)
     }
@@ -311,7 +307,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     def go(rem: List[ByteVector]): Unit = if (!rem.isEmpty) rem.head match {
       case Chunk(bs) => f(bs); go(rem.tail)
       case Append(l,r) => go(l::r::rem.tail)
-      case Buffer(_,_,hd,tl) => go(hd::tl.view::rem.tail)
+      case Buffer(_,_,tl) => go(tl.view::rem.tail)
     }
     go(this::Nil)
   }
@@ -576,15 +572,15 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * `ByteVector`, which will be used to support fast `:+` and `++`
    * of small vectors. A default chunk size is used.
    */
-  final def buffer: ByteVector = bufferOf(1024)
+  final def buffer: ByteVector = bufferBy(1024)
 
   /**
    * Allocate (unobservable) mutable scratch space at the end of this
    * `ByteVector`, with chunks of the given size, which will be used to
    * support fast `:+` and `++` of small vectors.
    */
-  final def bufferOf(chunkSize: Int): ByteVector =
-    Buffer(new AtomicLong(0), 0, this, Tail(new collection.mutable.ArrayBuffer, new Array[Byte](chunkSize), 0))
+  final def bufferBy(chunkSize: Int): ByteVector =
+    Buffer(new AtomicLong(0), 0, Tail(Vector(this), new Array[Byte](chunkSize), 0))
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -1254,80 +1250,146 @@ object ByteVector {
     def readResolve: AnyRef = ByteVector.view(bytes)
   }
 
-  private case class Buffer(id: AtomicLong, stamp: Long, hd: ByteVector, tl: Tail) extends ByteVector {
-    def size = hd.size + tl.size
+  /*
+   * `Buffer` is a `ByteVector` supporting fast `:+` and `++` operations, using
+   * an (unobservable) mutable scratch `Array[Byte]` at the end of the vector.
+   * The scratch space is written in an append-only fashion, which lets us
+   * safely share the same `Array` between multiple `ByteVector` instances,
+   * so long as we mutably append to this scratch space _at most once_ from a
+   * given `ByteVector`.
+   *
+   * That is, given {{{
+   *    val b = ByteVector.empty.buffer
+   *    val b2 = b ++ foo
+   *    val b3 = b ++ bar
+   *    val b22 = b2 ++ baz
+   *  }}}
+   *
+   * We obviously cannot have both `b2` and `b3` mutably append to the same scratch
+   * space, as `b3` would then overwrite what was written by `b2`. The solution
+   * adopted here (see [1]) is to let `b2` write mutable to the buffer, but `b3`,
+   * evaluated later, must make a copy.
+   *
+   * [1]: http://www.serpentine.com/blog/2014/05/31/attoparsec/
+   */
+  private case class Buffer(id: AtomicLong, stamp: Long, tl: Tail) extends ByteVector {
+    def size = tl.size
+
     override def :+(b: Byte) =
       snoc(b)
-    def snoc(bs: ByteVector): ByteVector = {
+
+    def snoc(bs: ByteVector): ByteVector =
       // threads race to increment id, winner gets to update tl mutably
-      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
-        tl.snoc(bs)
-        Buffer(id, stamp+1, hd, tl)
-      }
+      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834)
+        Buffer(id, stamp+1, tl.snoc(bs))
       else // losers copy to a fresh ByteVector
-        (hd ++ tl.toByteVector ++ bs).bufferOf(tl.lastChunk.length)
-    }
-    def snoc(b: Byte): ByteVector = {
+        (tl.toByteVector ++ bs).bufferBy(tl.lastChunk.length)
+
+    def snoc(b: Byte): ByteVector =
       // threads race to increment id, winner gets to update tl mutably
-      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834) {
-        tl.snoc(b)
-        Buffer(id, stamp+1, hd, tl)
-      }
+      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834)
+        Buffer(id, stamp+1, tl.snoc(b))
       else // losers copy to a fresh ByteVector
-        (hd ++ tl.toByteVector :+ b).bufferOf(tl.lastChunk.length)
-    }
-    def freeze: ByteVector = hd ++ tl.toByteVector
+        (tl.toByteVector :+ b).bufferBy(tl.lastChunk.length)
+
+    def freeze: ByteVector = tl.toByteVector
+
+    def drop(n: Int, accR: List[ByteVector]): ByteVector =
+      accR.foldLeft(tl.drop(id, stamp, n))(_ ++ _)
+
+    def take(accL: List[ByteVector], n: Int): ByteVector =
+      accL.foldLeft(tl.take(id, stamp, n))((r,l) => l ++ r)
+
     // override def pretty(s: String) = s + s"Buffer(${id.get}, $hd, $tl)"
   }
 
-  private case class Tail(chunks: collection.mutable.ArrayBuffer[ByteVector], lastChunk: Array[Byte],
-                          var lastSize: Int) {
+  // invariant: `chunks` is nonempty, all chunks except the first have size == lastChunk.length
+  private case class Tail(chunks: Vector[ByteVector], lastChunk: Array[Byte], lastSize: Int) {
 
-    def size = chunks.size * lastChunk.length + lastSize
+    def chunkedSize =
+      chunks.head.size + (chunks.size-1)*lastChunk.length
+
+    def size =
+      chunks.head.size + ((chunks.size-1) * lastChunk.length) + lastSize
+
+    def address(i: Int): (Int,Int) = {
+      val chN = chunks.head.size
+      if (i <= chN) (0,i)
+      else {
+        val bin = (i - chN) / lastChunk.length + 1
+        val localIndex = (i - chN) % lastChunk.length
+        (bin, localIndex)
+      }
+    }
+
+    def drop(id: AtomicLong, stamp: Long, n: Int): ByteVector = {
+      val cs = chunkedSize
+      if (n >= cs) ByteVector.view(lastChunk).take(lastSize).drop(n - cs)
+      else {
+        val (bin,j) = address(n)
+        val droppedChunks = chunks.drop(bin)
+        Buffer(id, stamp, Tail(droppedChunks.head.drop(j) +: droppedChunks.tail, lastChunk, lastSize))
+      }
+    }
+
+    def take(id: AtomicLong, stamp: Long, n: Int): ByteVector = {
+      val cs = chunkedSize
+      if (n <= cs) {
+        val (bin,j) = address(n)
+        val takenChunks = chunks.take(bin)
+        takenChunks.init.foldLeft(ByteVector.empty)(_ ++ _) ++
+        takenChunks.last.take(j+1)
+      }
+      else
+        Buffer(id, stamp, Tail(chunks, lastChunk, n - cs))
+    }
+
     @annotation.tailrec
-    final def snoc(bs: ByteVector): Unit = {
-      if (bs.isEmpty) ()
-      else if (lastSize != 0) {
+    final def snoc(bs: ByteVector): Tail = {
+      if (bs.isEmpty) this
+      else if (lastSize != 0) { // fill up the last chunk first
         val rem = lastChunk.size - lastSize
         val bsh = bs.take(rem)
         bsh.copyToArray(lastChunk, lastSize)
-        lastSize += bsh.size
-        if (lastSize == lastChunk.length) {
-          lastSize = 0
-          chunks += ByteVector(lastChunk)
-        }
-        snoc(bs.drop(rem))
+        if (lastSize + bsh.size == lastChunk.length)
+          Tail(chunks :+ ByteVector.view(lastChunk), new Array[Byte](lastChunk.length), 0).snoc(bs.drop(rem))
+        else
+          Tail(chunks, lastChunk, lastSize + bsh.size)
       }
-      else {
-        if (bs.size > lastChunk.length) {
-          val hd = bs.take(lastChunk.length)
-          chunks += hd
-          snoc(bs.drop(lastChunk.length))
+      else { // last chunk is empty
+        if (bs.size >= lastChunk.length) {   // we're >= than last chunk, so add to `chunks` directly
+          val hd = bs.take(lastChunk.length) // bypassing an extra copy
+          val tl = bs.drop(lastChunk.length)
+          Tail(chunks :+ hd, lastChunk, 0) snoc tl
         }
-        else {
+        else { // we're < last chunk, therefore copy to the `lastChunk` array
           bs.copyToArray(lastChunk, 0)
-          lastSize += bs.size
-          if (lastSize == lastChunk.length) {
-            lastSize = 0
-            chunks += ByteVector(lastChunk)
-          }
+          Tail(chunks, lastChunk, lastSize + bs.size)
         }
       }
     }
 
-    def snoc(b: Byte): Unit = {
-      if (lastSize == lastChunk.length) {
-        chunks += ByteVector(lastChunk)
-        lastSize = 0
+    def snoc(b: Byte): Tail =
+      if (lastSize == lastChunk.length) { // last chunk is full, move it to `chunks`
+        val chunks2 = chunks :+ ByteVector.view(lastChunk)
+        val lastChunk2 = new Array[Byte](lastChunk.length)
+        lastChunk2(0) = b // add the byte to a freshly-allocated array
+        Tail(chunks2, lastChunk2, 1)
       }
-      lastChunk(lastSize) = b
-      lastSize += 1
-    }
+      else { // last chunk not full, set the byte and increment lastSize
+        lastChunk(lastSize) = b
+        Tail(chunks, lastChunk, lastSize + 1)
+      }
 
     def get(i: Int): Byte = {
-      val bin = i / lastChunk.length
-      if (bin <= chunks.length) chunks(bin).get(i % lastChunk.length)
-      else lastChunk(i)
+      val hN = chunks.head.size
+      if (i < hN) chunks.head(i)
+      else {
+        val j = i - hN
+        val bin = j / lastChunk.length
+        if (bin <= chunks.length) chunks(bin+1).get(j % lastChunk.length)
+        else lastChunk(j)
+      }
     }
 
     def toByteVector =
