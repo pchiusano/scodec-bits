@@ -1295,12 +1295,15 @@ object ByteVector {
     override def :+(b: Byte) =
       snoc(b)
 
+    // NB: if `bs` fits in scratch space and is itself a buffer, it will be
+    // unbuffered before being added. This avoids proliferation of scratch space
+    // for tiny ByteVectors
     def snoc(bs: ByteVector): ByteVector =
       // threads race to increment id, winner gets to update tl mutably
       if (id.compareAndSet(stamp, stamp+1))
-        Buffer(id, stamp+1, tl.snoc(if (bs.size < tl.lastChunk.length) bs.unbuffer else bs))
+        Buffer(id, stamp+1, tl.snoc(bs))
       else // loser has to make a copy of the scratch space
-        Buffer(new AtomicLong(0), 0, tl.freshen).snoc(if (bs.size < tl.lastChunk.length) bs.unbuffer else bs)
+        Buffer(new AtomicLong(0), 0, tl.freshen).snoc(bs)
 
     def snoc(b: Byte): ByteVector =
       // threads race to increment id, winner gets to update tl mutably
