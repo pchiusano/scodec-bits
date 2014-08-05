@@ -572,6 +572,9 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * Allocate (unobservable) mutable scratch space at the end of this
    * `ByteVector`, which will be used to support fast `:+` and `++`
    * of small vectors. A default chunk size is used.
+   *
+   * Note that `:+`, `++`, and `drop` on the result of a call to `buffer`
+   * are guaranteed to return another buffered `ByteVector`.
    */
   final def buffer: ByteVector = bufferBy(1024)
 
@@ -579,13 +582,22 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * Allocate (unobservable) mutable scratch space at the end of this
    * `ByteVector`, with chunks of the given size, which will be used to
    * support fast `:+` and `++` of small vectors.
+   *
+   * Note that `:+`, `++`, and `drop` on the result of a call to `buffer`
+   * are guaranteed to return another buffered `ByteVector`.
    */
   final def bufferBy(chunkSize: Int): ByteVector =
     this match {
       case b@Buffer(_,_,tl) => if (tl.lastChunk.length >= chunkSize) b
-                               else b.freeze.bufferBy(chunkSize)
+                               else b.rebuffer(chunkSize)
       case _ => Buffer(new AtomicLong(0), 0, Tail(Queue(this), new Array[Byte](chunkSize), 0, this.size))
     }
+
+  /**
+   * Collapse any buffered chunks at the end of this `ByteVector`,
+   * resulting in an unbuffered `ByteVector`.
+   */
+  def unbuffer: ByteVector = this
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -1285,19 +1297,22 @@ object ByteVector {
 
     def snoc(bs: ByteVector): ByteVector =
       // threads race to increment id, winner gets to update tl mutably
-      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834)
-        Buffer(id, stamp+1, tl.snoc(bs))
-      else // losers copy to a fresh ByteVector
-        (tl.toByteVector ++ bs).bufferBy(tl.lastChunk.length)
+      if (id.compareAndSet(stamp, stamp+1))
+        Buffer(id, stamp+1, tl.snoc(if (bs.size < tl.lastChunk.length) bs.unbuffer else bs))
+      else // loser has to make a copy of the scratch space
+        Buffer(new AtomicLong(0), 0, tl.freshen).snoc(if (bs.size < tl.lastChunk.length) bs.unbuffer else bs)
 
     def snoc(b: Byte): ByteVector =
       // threads race to increment id, winner gets to update tl mutably
-      if (id.compareAndSet(stamp, stamp+1) && tl.size < 16834)
+      if (id.compareAndSet(stamp, stamp+1))
         Buffer(id, stamp+1, tl.snoc(b))
-      else // losers copy to a fresh ByteVector
-        (tl.toByteVector :+ b).bufferBy(tl.lastChunk.length)
+      else // loser has to make a copy of the scratch space
+        Buffer(new AtomicLong(0), 0, tl.freshen).snoc(b)
 
-    def freeze: ByteVector = tl.toByteVector
+    override def unbuffer: ByteVector = tl.toByteVector
+
+    def rebuffer(chunkSize: Int): ByteVector =
+      Buffer(new AtomicLong(0), 0, tl.rebuffer(chunkSize))
 
     def drop(n: Int, accR: List[ByteVector]): ByteVector =
       accR.foldLeft(tl.drop(id, stamp, n))(_ ++ _)
@@ -1306,12 +1321,25 @@ object ByteVector {
       accL.foldLeft(tl.take(id, stamp, n))((r,l) => l ++ r)
   }
 
-
   private case class Tail(chunks: Queue[ByteVector], lastChunk: Array[Byte], lastSize: Int, size: Int) {
+
+    // make a copy of the last chunk
+    def freshen: Tail = {
+      val lastChunk2 = new Array[Byte](lastChunk.length)
+      lastChunk.copyToArray(lastChunk2)
+      Tail(chunks, lastChunk2, lastSize, size)
+    }
+
+    def rebuffer(chunkSize: Int): Tail = {
+      require (chunkSize > lastChunk.length)
+      val lastChunk2 = new Array[Byte](chunkSize)
+      lastChunk.copyToArray(lastChunk2)
+      Tail(chunks, lastChunk2, lastSize, size)
+    }
 
     def drop(id: AtomicLong, stamp: Long, n: Int): ByteVector =
       if (n > lastChunk.length * 3) toByteVector.drop(n)
-      else {
+      else { // if dropping just a few chunks' worth, just dequeue necessary elements from `chunks`
         var remaining = n
         var q = chunks
         while (remaining > 0 && q.nonEmpty) {
@@ -1325,12 +1353,15 @@ object ByteVector {
             q = q2
           }
         }
-        if (remaining > 0) ByteVector.view(lastChunk).take(lastSize).drop(remaining)
-        else Buffer(id, stamp, Tail(q, lastChunk, lastSize, size - n))
+        if (remaining > 0) // we've exhaused `chunks`, take from `lastChunk`
+          // we still rebuffer, useful to have invariant that dropping from a `Buffer` always yields a `Buffer`
+          ByteVector.view(lastChunk).take(lastSize).drop(remaining).bufferBy(lastChunk.length)
+        else // we've already dropped everything we need to, build new `Buffer`
+          Buffer(id, stamp, Tail(q, lastChunk, lastSize, size - n))
       }
 
     def take(id: AtomicLong, stamp: Long, n: Int): ByteVector =
-      if (n < lastChunk.length * 3) {
+      if (n < lastChunk.length * 3) { // if taking just a few chunks' worth, dequeue necessary elements from `chunks`
         var remaining = n
         var q = chunks enqueue ByteVector.view(lastChunk).take(lastSize)
         var acc = ByteVector.empty
@@ -1348,18 +1379,19 @@ object ByteVector {
         }
         acc
       }
-      else toByteVector.take(n)
+      else // otherwise, convert to full `ByteVector`
+        toByteVector.take(n)
 
     final def snoc(bs: ByteVector): Tail =
       if (bs.size >= lastChunk.length) {
-        if (lastSize != 0) {
+        if (lastSize != 0) { // we promote `lastChunk` to `chunks`
           val buf = new Array[Byte](lastChunk.length)
           Tail(chunks.enqueue(ByteVector.view(lastChunk).take(lastSize)).enqueue(bs), buf, 0, size + bs.size)
         }
-        else
+        else // just enqueue `bs` directly to `chunks`
           Tail(chunks.enqueue(bs), lastChunk, lastSize, size + bs.size)
       }
-      else {
+      else { // try filling up `lastChunk`
         val rem = lastChunk.length - lastSize
         if (bs.size <= rem) {
           bs.copyToArray(lastChunk, lastSize)
@@ -1393,6 +1425,8 @@ object ByteVector {
       if (lastSize == 0) chunks.toList ++ tl
       else chunks.toList ++ (ByteVector.view(lastChunk).take(lastSize) :: tl)
 
+    // we cache this to get reasonable performance in case this buffer gets used
+    // as a regular vector, with repeated calls to `get`, `take`, `drop`, etc
     lazy val toByteVector =
       chunks.foldLeft(ByteVector.empty)(_ ++ _) ++ ByteVector.view(lastChunk).take(lastSize)
   }
