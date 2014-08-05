@@ -175,9 +175,9 @@ class ByteVectorTest extends BitsSuite {
   }
 
   test("buffer :+") {
-    forAll { (bs: List[ByteVector], n: Int) => {
-      val unbuf = bs.foldLeft(ByteVector.empty)(_ ++ _)
-      val buf = bs.foldLeft(ByteVector.empty.bufferBy((n % 1024).max(0) + 1))((acc,a) =>
+    forAll { (b: ByteVector, bs: List[ByteVector], n: Int) => {
+      val unbuf = bs.foldLeft(b)(_ ++ _)
+      val buf = bs.foldLeft(b.bufferBy((n % 1024).max(0) + 1))((acc,a) =>
         a.foldLeft(acc)(_ :+ _)
       )
       unbuf shouldBe buf
@@ -186,9 +186,9 @@ class ByteVectorTest extends BitsSuite {
   }
 
   test("buffer ++/take/drop") {
-    forAll { (bs: List[ByteVector], n: Int) =>
-      val unbuf = bs.foldLeft(ByteVector.empty)(_ ++ _)
-      val buf = bs.foldLeft(ByteVector.empty.bufferBy((n % 1024).max(0) + 1))(_ ++ _)
+    forAll { (b: ByteVector, bs: List[ByteVector], n: Int) =>
+      val unbuf = bs.foldLeft(b)(_ ++ _)
+      val buf = bs.foldLeft(b.bufferBy((n % 1024).max(0) + 1))(_ ++ _)
       unbuf shouldBe buf
       (0 until unbuf.size).foreach { i => unbuf(i) shouldBe buf(i) }
       val ind = (n % (unbuf.size+1)).max(0) + 1
