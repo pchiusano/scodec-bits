@@ -307,7 +307,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     def go(rem: List[ByteVector]): Unit = if (!rem.isEmpty) rem.head match {
       case Chunk(bs) => f(bs); go(rem.tail)
       case Append(l,r) => go(l::r::rem.tail)
-      case Buffer(_,_,tl) => go(tl.view::rem.tail)
+      case Buffer(_,_,tl) => go(tl.toByteVector::rem.tail)
     }
     go(this::Nil)
   }
@@ -580,7 +580,11 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * support fast `:+` and `++` of small vectors.
    */
   final def bufferBy(chunkSize: Int): ByteVector =
-    Buffer(new AtomicLong(0), 0, Tail(Vector(this), new Array[Byte](chunkSize), 0))
+    this match {
+      case b@Buffer(_,_,tl) => if (tl.lastChunk.length >= chunkSize) b
+                               else b.freeze.bufferBy(chunkSize)
+      case _ => Buffer(new AtomicLong(0), 0, Tail(this, new Array[Byte](chunkSize), 0))
+    }
 
   /**
    * Represents the contents of this vector as a read-only `java.nio.ByteBuffer`.
@@ -1301,95 +1305,62 @@ object ByteVector {
       accL.foldLeft(tl.take(id, stamp, n))((r,l) => l ++ r)
   }
 
-  // invariant: `chunks` is nonempty, all chunks except the first have size == lastChunk.length
-  private case class Tail(chunks: Vector[ByteVector], lastChunk: Array[Byte], lastSize: Int) {
+  private case class Tail(chunked: ByteVector, lastChunk: Array[Byte], lastSize: Int) {
 
-    def chunkedSize =
-      chunks.head.size + (chunks.size-1)*lastChunk.length
+    def size = chunked.size + lastSize
 
-    def size =
-      chunks.head.size + ((chunks.size-1) * lastChunk.length) + lastSize
-
-    def address(i: Int): (Int,Int) = {
-      val chN = chunks.head.size
-      if (i < chN) (0,i)
-      else {
-        val bin = (i - chN) / lastChunk.length + 1
-        val localIndex = (i - chN) % lastChunk.length
-        (bin, localIndex)
-      }
-    }
-
-    def drop(id: AtomicLong, stamp: Long, n: Int): ByteVector = {
-      val cs = chunkedSize
-      if (n >= cs) ByteVector.view(lastChunk).take(lastSize).drop(n - cs)
-      else {
-        val (bin,j) = address(n)
-        val droppedChunks = chunks.drop(bin)
-        Buffer(id, stamp, Tail(droppedChunks.head.drop(j) +: droppedChunks.tail, lastChunk, lastSize))
-      }
-    }
-
-    def take(id: AtomicLong, stamp: Long, n: Int): ByteVector = {
-      val cs = chunkedSize
-      if (n <= cs)
-        // why +2?
-        // first chunk may be empty, always take one extra chunk
-        // n may not be divisible by lastChunk.length (n = 9, chunk = 2),
-        //   and we want to 'round up' (n = 9, chunk size = 2 we need at least 5 chunks, not 4)
-        chunks.take(n/lastChunk.length + 2).foldLeft(ByteVector.empty)(_ ++ _).take(n)
+    def drop(id: AtomicLong, stamp: Long, n: Int): ByteVector =
+      if (n >= chunked.size)
+        ByteVector.view(lastChunk).take(lastSize).drop(n - chunked.size)
       else
-        Buffer(id, stamp, Tail(chunks, lastChunk, n - cs))
-    }
+        Buffer(id, stamp, Tail(chunked.drop(n), lastChunk, lastSize))
 
-    @annotation.tailrec
-    final def snoc(bs: ByteVector): Tail = {
-      if (bs.isEmpty) this
-      else if (lastSize != 0) { // fill up the last chunk first
-        val rem = lastChunk.size - lastSize
-        val bsh = bs.take(rem)
-        bsh.copyToArray(lastChunk, lastSize)
-        if (lastSize + bsh.size == lastChunk.length)
-          Tail(chunks :+ ByteVector.view(lastChunk), new Array[Byte](lastChunk.length), 0).snoc(bs.drop(rem))
+    def take(id: AtomicLong, stamp: Long, n: Int): ByteVector =
+      if (n <= chunked.size) chunked.take(n)
+      else Buffer(id, stamp, Tail(chunked, lastChunk, (n - chunked.size) min lastSize))
+
+    final def snoc(bs: ByteVector): Tail =
+      if (bs.size >= lastChunk.length) {
+        if (lastSize != 0) {
+          val buf = new Array[Byte](lastChunk.length)
+          Tail(chunked ++ ByteVector.view(lastChunk).take(lastSize) ++ bs, buf, 0)
+        }
         else
-          Tail(chunks, lastChunk, lastSize + bsh.size)
+          Tail(chunked ++ bs, lastChunk, lastSize)
       }
-      else { // last chunk is empty
-        if (bs.size >= lastChunk.length) {   // we're >= than last chunk, so add to `chunks` directly
-          val hd = bs.take(lastChunk.length) // bypassing an extra copy
-          val tl = bs.drop(lastChunk.length)
-          Tail(chunks :+ hd, lastChunk, 0) snoc tl
+      else {
+        val rem = lastChunk.length - lastSize
+        if (bs.size <= rem) {
+          bs.copyToArray(lastChunk, lastSize)
+          Tail(chunked, lastChunk, lastSize + bs.size)
         }
-        else { // we're < last chunk, therefore copy to the `lastChunk` array
-          bs.copyToArray(lastChunk, 0)
-          Tail(chunks, lastChunk, lastSize + bs.size)
+        else {
+          bs.take(rem).copyToArray(lastChunk, lastSize)
+          val chunked2 = chunked ++ ByteVector.view(lastChunk)
+          val buf = new Array[Byte](lastChunk.length)
+          val bst = bs.drop(rem)
+          bst.copyToArray(buf, 0)
+          Tail(chunked2, buf, bst.size)
         }
       }
-    }
 
     def snoc(b: Byte): Tail =
       if (lastSize == lastChunk.length) { // last chunk is full, move it to `chunks`
-        val chunks2 = chunks :+ ByteVector.view(lastChunk)
         val lastChunk2 = new Array[Byte](lastChunk.length)
         lastChunk2(0) = b // add the byte to a freshly-allocated array
-        Tail(chunks2, lastChunk2, 1)
+        Tail(chunked ++ ByteVector.view(lastChunk), lastChunk2, 1)
       }
       else { // last chunk not full, set the byte and increment lastSize
         lastChunk(lastSize) = b
-        Tail(chunks, lastChunk, lastSize + 1)
+        Tail(chunked, lastChunk, lastSize + 1)
       }
 
-    def get(i: Int): Byte = {
-      val (bin,j) = address(i)
-      if (bin == chunks.size) lastChunk(j)
-      else chunks(bin)(j)
-    }
+    def get(i: Int): Byte =
+      if (i < chunked.size) chunked.get(i)
+      else lastChunk(i - chunked.size)
 
     def toByteVector =
-      chunks.foldLeft(ByteVector.empty)(_ ++ _) ++ ByteVector(lastChunk).take(lastSize)
-
-    def view =
-      chunks.foldLeft(ByteVector.empty)(_ ++ _) ++ ByteVector.view(lastChunk).take(lastSize)
+      chunked ++ ByteVector.view(lastChunk).take(lastSize)
   }
 }
 
