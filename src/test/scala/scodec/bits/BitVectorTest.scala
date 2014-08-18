@@ -166,7 +166,7 @@ class BitVectorTest extends BitsSuite {
   test("compact") {
     forAll { (x: BitVector) =>
       x.compact shouldBe x
-      x.force.depthExceeds(16) shouldBe false
+      (x.force.depth < 22) shouldBe true
     }
   }
 
