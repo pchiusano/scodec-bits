@@ -1510,8 +1510,20 @@ object BitVector {
     }
 
     def take(accL: Vector[BitVector], n: Long): BitVector =
-      // todo: no need to fully unbuffer
-      concat(accL) ++ unbuffer.take(n)
+      accL.foldLeft(BitVector.empty.bufferBy(chunkSize))(_ ++ _) ++ btake(n)
+
+    def btake(n: Long): BitVector = {
+      var rem = n
+      var remChunks = chunks
+      var acc = BitVector.empty.bufferBy(chunkSize)
+      while (rem > 0 && remChunks.nonEmpty) {
+        val h = remChunks.head
+        acc = acc ++ remChunks.head.take(rem)
+        rem -= h.size
+        remChunks = remChunks.tail
+      }
+      acc
+    }
 
     def bdrop(n: Long): BitVector = {
       var remChunks = chunks

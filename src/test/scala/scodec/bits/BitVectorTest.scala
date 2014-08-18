@@ -451,4 +451,24 @@ class BitVectorTest extends BitsSuite {
   test("serialization") {
     forAll { (x: BitVector) => serializationShouldRoundtrip(x) }
   }
+
+  test("buffering") {
+    implicit val longs = Arbitrary(Gen.choose(1L,50L))
+
+    forAll { (xs: List[BitVector], chunkSize: Long, delta: Long) =>
+      val unbuffered = xs.foldLeft(BitVector.empty)(_ ++ _)
+      val buffered = xs.foldLeft(BitVector.empty.bufferBy(chunkSize))(_ ++ _)
+      // get should be consistent for all indices
+      (0L until unbuffered.size).foreach { i =>
+        buffered(i) shouldBe unbuffered(i)
+      }
+      val i = delta min ((unbuffered.size - 1) max 0)
+      if (i < unbuffered.size)
+        buffered.update(i, i%2 == 0)(i) shouldBe unbuffered.update(i, i%2 == 0)(i)
+      buffered.size shouldBe unbuffered.size
+      buffered shouldBe unbuffered
+      buffered.take(delta) shouldBe unbuffered.take(delta)
+      buffered.drop(delta) shouldBe unbuffered.drop(delta)
+    }
+  }
 }
