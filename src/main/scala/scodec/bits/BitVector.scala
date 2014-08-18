@@ -44,6 +44,8 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
    */
   final def isEmpty: Boolean = sizeLessThan(1)
 
+  private[scodec] def naturalChunks: Vector[BitVector]
+
   /**
    * Returns true if this vector has a non-zero number of bits.
    *
@@ -1408,6 +1410,7 @@ object BitVector {
 
   private[scodec] case class Bytes(val underlying: ByteVector, val size: Long) extends BitVector {
     private val invalidBits = 8 - validBitsInLastByte(size)
+    def naturalChunks = Vector(this)
     def get(n: Long): Boolean = {
       checkBounds(n)
       getBit(underlying((n / 8).toInt), (n % 8).toInt)
@@ -1443,6 +1446,7 @@ object BitVector {
 
   private[scodec] case class Drop(underlying: Bytes, m: Long) extends BitVector {
     val size = (underlying.size - m) max 0
+    def naturalChunks = Vector(this)
     def get(n: Long): Boolean =
       underlying.get(m + n)
     def update(n: Long, high: Boolean): BitVector =
@@ -1455,6 +1459,7 @@ object BitVector {
       sizeUpperBound.set(sz)
       sz
     }
+    def naturalChunks = Vector(left, right)
     def get(n: Long): Boolean =
       if (n < left.size) left.get(n)
       else right.get(n - left.size)
@@ -1464,6 +1469,7 @@ object BitVector {
   }
   private[scodec] case class Suspend(thunk: () => BitVector) extends BitVector {
     lazy val underlying = thunk()
+    def naturalChunks = Vector(this)
     def get(n: Long): Boolean = underlying.get(n)
     def update(n: Long, high: Boolean): BitVector = underlying.update(n, high)
     def size = underlying.size
@@ -1476,20 +1482,21 @@ object BitVector {
    */
   case class Chunks(chunks: Vector[BitVector], chunkSize: Long) extends BitVector {
 
-    override def ++(b: BitVector): Chunks = if (b.isEmpty) this else {
-      val last = chunks.last
-      var chunks2 =
-        if (last.size + b.size <= chunkSize) // merge `b` into last
-          chunks.init :+ (last ++ b.unbuffer)
-        else chunks :+ b
+    override def naturalChunks = chunks
 
+    override def ++(b: BitVector): Chunks = if (b.isEmpty) this else {
+      var last = b
+      var i = chunks.length - 1
       // repeatedly combine last two elements of `chunk` to preserve
       // invariant that chunk sizes decrease exponentially;
       // this takes amortized constant time, worst case logarithmic
-      while (chunks2.size > 1 && chunks2.last.size*2 > chunks2(chunks2.length - 2).size) {
-        chunks2 = chunks2.dropRight(2) :+ Append(chunks2(chunks2.length - 2), chunks2.last)
+      while (i > 0 && last.size*2 > chunks(i).size) {
+        val prev = chunks(i)
+        last = if (last.size + prev.size <= chunkSize) prev ++ last
+               else                                    Append(prev, last)
+        i -= 1
       }
-      Chunks(chunks2, chunkSize)
+      Chunks(chunks.take(i+1) :+ last, chunkSize)
     }
 
     lazy val size = chunks.foldLeft(0L)(_ + _.size)
