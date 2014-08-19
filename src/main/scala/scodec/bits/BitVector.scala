@@ -582,12 +582,13 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
 
     // we collect up all the chunks, then merge them in O(n * log n)
     @annotation.tailrec
-    def go(b: BitVector, acc: Vector[Bytes]): Vector[Bytes] = b match {
-      case s@Suspend(_) => go(s.underlying, acc)
-      case b@Bytes(_,_) => acc :+ b
-      case Append(l,r) => go(r, acc :+ l.compact) // not stack safe for left-recursion
-      case Drop(b, from) => acc :+ interpretDrop(b,from)
-      case c: Chunks => c.chunks.foldLeft(acc)(_ :+ _.compact)
+    def go(b: List[BitVector], acc: Vector[Bytes]): Vector[Bytes] = b match {
+      case (s@Suspend(_)) :: rem => go(s.underlying :: rem, acc)
+      case (b@Bytes(_,_)) :: rem => go(rem, acc :+ b)
+      case Append(l,r)    :: rem => go(r :: rem, acc :+ l.compact) // not stack safe for left-recursion
+      case Drop(b, from)  :: rem => go(rem, acc :+ interpretDrop(b,from))
+      case (c: Chunks)    :: rem => go(c.chunks.reverseIterator.foldLeft(rem)((tl,hd) => hd :: tl), acc)
+      case _ => acc
     }
 
     def interpretDrop(b: Bytes, from: Long): Bytes = {
@@ -625,7 +626,7 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
         if (b2 eq bs.underlying) bs
         else Bytes(b2, bs.size)
       // otherwise we fall back to general purpose algorithm
-      case _ => reduceBalanced(go(this, Vector()))(_.size)(_ combine _) match {
+      case _ => reduceBalanced(go(List(this), Vector()))(_.size)(_ combine _) match {
         case Bytes(b,n) => Bytes(b.compact,n) // we compact the underlying ByteVector as well
       }
     }
@@ -659,7 +660,7 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
           case Append(l,r) => go(l +: r +: cont)
           case d@Drop(_, _) => cont.foldLeft[BitVector](d)(_ ++ _)
           case s@Suspend(_) => go(s.underlying +: cont)
-          case b: Chunks => go(b.chunks.reverse.foldLeft(cont)((r,l) => l +: r))
+          case b: Chunks => go(b.chunks.reverseIterator.foldLeft(cont)((r,l) => l +: r))
         }
       }}
       else cont.foldLeft(BitVector.empty)(_ ++ _)

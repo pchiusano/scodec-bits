@@ -166,7 +166,7 @@ class BitVectorTest extends BitsSuite {
   test("compact") {
     forAll { (x: BitVector) =>
       x.compact shouldBe x
-      (x.force.depth < 22) shouldBe true
+      (x.force.depth < 18) shouldBe true
     }
   }
 
@@ -455,10 +455,10 @@ class BitVectorTest extends BitsSuite {
   test("buffering") {
     implicit val longs = Arbitrary(Gen.choose(-1L,50L))
 
-    def check(xs: List[BitVector], delta: Long): Unit = {
+    def check(h: BitVector, xs: List[BitVector], delta: Long): Unit = {
       val unbuffered =
-        BitVector.reduceBalanced(BitVector.empty :: xs)(_.size)(BitVector.Append(_,_))
-      val buffered = xs.foldLeft(BitVector.empty)(_ ++ _)
+        BitVector.reduceBalanced(h :: xs)(_.size)(BitVector.Append(_,_))
+      val buffered = xs.foldLeft(h)(_ ++ _)
       // sanity check for buffered
       (buffered.take(delta) ++ buffered.drop(delta)) shouldBe buffered
       // checks for consistency:
@@ -479,10 +479,11 @@ class BitVectorTest extends BitsSuite {
       buffered.drop(delta) shouldBe unbuffered.drop(delta)
     }
 
-    forAll { (xs: List[BitVector], delta: Long) =>
-      check(xs, delta)
+    forAll { (h: BitVector, xs: List[BitVector], delta: Long) =>
+      check(h, xs, delta)
       // "evil" case for buffering - chunks of increasing sizes
-      check(xs.sortBy(_.size), delta)
+      val evil = (h :: xs).sortBy(_.size)
+      check(evil.head, evil.tail, delta)
     }
   }
 }
