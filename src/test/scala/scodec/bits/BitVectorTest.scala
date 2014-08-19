@@ -453,9 +453,9 @@ class BitVectorTest extends BitsSuite {
   }
 
   test("buffering") {
-    implicit val longs = Arbitrary(Gen.choose(1L,50L))
+    implicit val longs = Arbitrary(Gen.choose(-1L,50L))
 
-    forAll { (xs: List[BitVector], chunkSize: Long, delta: Long) =>
+    def check(xs: List[BitVector], delta: Long): Unit = {
       val unbuffered =
         BitVector.reduceBalanced(BitVector.empty :: xs)(_.size)(BitVector.Append(_,_))
       val buffered = xs.foldLeft(BitVector.empty)(_ ++ _)
@@ -468,7 +468,7 @@ class BitVectorTest extends BitsSuite {
         buffered(i) shouldBe unbuffered(i)
       }
       // update
-      val i = delta min ((unbuffered.size - 1) max 0)
+      val i = delta min (unbuffered.size - 1) max 0
       if (buffered.nonEmpty)
         buffered.update(i, i%2 == 0)(i) shouldBe unbuffered.update(i, i%2 == 0)(i)
       // size
@@ -477,6 +477,12 @@ class BitVectorTest extends BitsSuite {
       buffered.take(delta) shouldBe unbuffered.take(delta)
       // drop
       buffered.drop(delta) shouldBe unbuffered.drop(delta)
+    }
+
+    forAll { (xs: List[BitVector], delta: Long) =>
+      check(xs, delta)
+      // "evil" case for buffering - chunks of increasing sizes
+      check(xs.sortBy(_.size), delta)
     }
   }
 }

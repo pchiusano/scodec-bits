@@ -1434,7 +1434,7 @@ object BitVector {
     override def ++(b: BitVector): Chunks = if (b.isEmpty) this else {
       var last = b
       var i = chunks.length - 1
-      if (i > 0 && last.size > chunks(i).size*2) { // sizes are way off
+      if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
         i = chunks.indexWhere(_.size > last.size)
         last = Append(Chunks(chunks.drop(i)), last)
         i -= 1
@@ -1442,7 +1442,7 @@ object BitVector {
       // repeatedly combine last two elements of `chunk` to preserve
       // invariant that chunk sizes decrease exponentially;
       // this takes amortized constant time, worst case logarithmic
-      while (i > 0 && last.size*2 > chunks(i).size) {
+      while (i >= 0 && last.size*2 > chunks(i).size) {
         val prev = chunks(i)
         val m = last.size + prev.size
         last = {
@@ -1515,14 +1515,10 @@ object BitVector {
       }
   }
 
-  /** Efficiently concatenate `vs` to produce a single `BitVector`. */
+  /** Concatenate `vs` to produce a single `BitVector`. */
   def concat(vs: Vector[BitVector]): BitVector =
-    if (vs.isEmpty) BitVector.empty
-    else if (vs.size == 1) vs.head
-    else {
-      val (l,r) = vs.splitAt(vs.size / 2)
-      concat(l) ++ concat(r)
-    }
+    // quite snappy with new algorithm!
+    vs.foldLeft(BitVector.empty)(_ ++ _)
 
   // bit twiddling operations
 
