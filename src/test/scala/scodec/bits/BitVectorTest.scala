@@ -456,18 +456,26 @@ class BitVectorTest extends BitsSuite {
     implicit val longs = Arbitrary(Gen.choose(1L,50L))
 
     forAll { (xs: List[BitVector], chunkSize: Long, delta: Long) =>
-      val unbuffered = xs.foldLeft(BitVector.empty)(_ ++ _)
-      val buffered = xs.foldLeft(BitVector.empty.bufferBy(chunkSize))(_ ++ _)
-      // get should be consistent for all indices
+      val unbuffered =
+        BitVector.reduceBalanced(BitVector.empty :: xs)(_.size)(BitVector.Append(_,_))
+      val buffered = xs.foldLeft(BitVector.empty)(_ ++ _)
+      // sanity check for buffered
+      (buffered.take(delta) ++ buffered.drop(delta)) shouldBe buffered
+      // checks for consistency:
+      buffered shouldBe unbuffered
+      // get
       (0L until unbuffered.size).foreach { i =>
         buffered(i) shouldBe unbuffered(i)
       }
+      // update
       val i = delta min ((unbuffered.size - 1) max 0)
-      if (i < unbuffered.size)
+      if (buffered.nonEmpty)
         buffered.update(i, i%2 == 0)(i) shouldBe unbuffered.update(i, i%2 == 0)(i)
+      // size
       buffered.size shouldBe unbuffered.size
-      buffered shouldBe unbuffered
+      // take
       buffered.take(delta) shouldBe unbuffered.take(delta)
+      // drop
       buffered.drop(delta) shouldBe unbuffered.drop(delta)
     }
   }
