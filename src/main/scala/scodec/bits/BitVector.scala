@@ -205,7 +205,8 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
    * @group collection
    */
   def ++(b2: BitVector): BitVector =
-    Chunks(Vector(this)) ++ b2
+    if (this.isEmpty) b2
+    else Chunks(Vector(this)) ++ b2
 
   /**
    * Returns a new vector with the specified bit prepended.
@@ -1430,28 +1431,31 @@ object BitVector {
       true
     }
 
-    override def ++(b: BitVector): Chunks = if (b.isEmpty) this else {
-      var last = b
-      var i = chunks.length - 1
-      if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
-        i = chunks.indexWhere(_.size > last.size)
-        last = Append(Chunks(chunks.drop(i)), last)
-        i -= 1
-      }
-      // repeatedly combine last two elements of `chunk` to preserve
-      // invariant that chunk sizes decrease exponentially;
-      // this takes amortized constant time, worst case logarithmic
-      while (i >= 0 && last.size*2 > chunks(i).size) {
-        val prev = chunks(i)
-        val m = last.size + prev.size
-        last = {
-          if (m <= 512 && m % 64 == 0) prev.compact.combine(last.compact)
-          else Append(prev, last)
+    override def ++(b: BitVector): BitVector =
+      if (b.isEmpty) this
+      else if (this.isEmpty) b
+      else {
+        var last = b
+        var i = chunks.length - 1
+        if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
+          i = chunks.indexWhere(_.size > last.size)
+          last = Append(Chunks(chunks.drop(i)), last)
+          i -= 1
         }
-        i -= 1
+        // repeatedly combine last two elements of `chunk` to preserve
+        // invariant that chunk sizes decrease exponentially;
+        // this takes amortized constant time, worst case logarithmic
+        while (i >= 0 && last.size*2 > chunks(i).size) {
+          val prev = chunks(i)
+          val m = last.size + prev.size
+          last = {
+            if (m <= 512 && m % 64 == 0) prev.compact.combine(last.compact)
+            else Append(prev, last)
+          }
+          i -= 1
+        }
+        Chunks(chunks.take(i+1) :+ last)
       }
-      Chunks(chunks.take(i+1) :+ last)
-    }
 
     lazy val size = {
       val n = chunks.foldLeft(0L)(_ + _.size)

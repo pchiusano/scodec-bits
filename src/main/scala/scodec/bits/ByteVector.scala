@@ -1257,28 +1257,31 @@ object ByteVector {
       var n = 0; chunks.foreach { bs => n += bs.size } // foldLeft would box/unbox
       n
     }
-    override def ++(b: ByteVector): ByteVector = if (b.isEmpty) this else {
-      var last = b
-      var i = chunks.length - 1
-      if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
-        i = chunks.indexWhere(_.size > last.size)
-        last = Append(Chunks(chunks.drop(i)), last)
-        i -= 1
-      }
-      // repeatedly combine last two elements of `chunk` to preserve
-      // invariant that chunk sizes decrease exponentially;
-      // this takes amortized constant time, worst case logarithmic
-      while (i >= 0 && last.size*2 > chunks(i).size) {
-        val prev = chunks(i)
-        val m = last.size + prev.size
-        last = {
-          if (m <= 64 && m % 8 == 0) Append(prev,last).compact
-          else Append(prev, last)
+    override def ++(b: ByteVector): ByteVector =
+      if (b.isEmpty) this
+      else if (this.isEmpty) b
+      else {
+        var last = b
+        var i = chunks.length - 1
+        if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
+          i = chunks.indexWhere(_.size > last.size)
+          last = Append(Chunks(chunks.drop(i)), last)
+          i -= 1
         }
-        i -= 1
+        // repeatedly combine last two elements of `chunk` to preserve
+        // invariant that chunk sizes decrease exponentially;
+        // this takes amortized constant time, worst case logarithmic
+        while (i >= 0 && last.size*2 > chunks(i).size) {
+          val prev = chunks(i)
+          val m = last.size + prev.size
+          last = {
+            if (m <= 64 && m % 8 == 0) Append(prev,last).compact
+            else Append(prev, last)
+          }
+          i -= 1
+        }
+        Chunks(chunks.take(i+1) :+ last)
       }
-      Chunks(chunks.take(i+1) :+ last)
-    }
 
     override def take(n: Int): ByteVector =
       if (size <= n) this
