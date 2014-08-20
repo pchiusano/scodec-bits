@@ -224,7 +224,7 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
    */
   def depth: Int = this match {
     case Append(l,r) => 1 + (l.depth max r.depth)
-    case c: Chunks => c.chunks.map(_.depth).max
+    case c: Chunks => 1 + c.chunks.map(_.depth).max
     case _ => 0
   }
 
@@ -953,14 +953,12 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
     case Append(l,r) => prefix + "append\n" +
                         l.internalPretty(prefix + "  ") + "\n" +
                         r.internalPretty(prefix + "  ")
-    case Bytes(b, n) =>
-      if (n > 16) prefix + s"bits $n #:${b.hashCode}"
-      else        prefix + s"bits $n 0x${b.toHex}"
+    case Bytes(b, n) => prefix + s"bits $n\n" + b.pretty("  " + prefix)
     case Drop(u, n) => prefix + s"drop ${n}\n" +
                        u.internalPretty(prefix + "  ")
-    case s@Suspend(_) => s.underlying.internalPretty(prefix)
+    case s@Suspend(_) => prefix + "suspend\n" + s.underlying.internalPretty(prefix + "  ")
     case c: Chunks => prefix + "chunks\n" +
-                               c.chunks.map(_.internalPretty(prefix + " ")).mkString("\n")
+                               c.chunks.map(_.internalPretty(prefix + "  ")).mkString("\n")
   }
 
   private def zipBytesWith(other: BitVector)(op: (Byte, Byte) => Int): BitVector = {
@@ -1027,7 +1025,7 @@ object BitVector {
    * @group constructors
    */
   def bits(b: Iterable[Boolean]): BitVector =
-    b.zipWithIndex.foldLeft(low(b.size))((acc,b) =>
+    b.iterator.zipWithIndex.foldLeft(low(b.size))((acc,b) =>
       acc.update(b._2, b._1)
     )
 

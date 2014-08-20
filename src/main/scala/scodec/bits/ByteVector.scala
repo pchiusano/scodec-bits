@@ -121,7 +121,8 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    * @group collection
    */
   def ++(other: ByteVector): ByteVector =
-    Chunks(Vector(this)) ++ other
+    if (this.isEmpty) other
+    else Chunks(Vector(this)) ++ other
 
   /**
    * Returns a new vector with the specified byte prepended.
@@ -776,14 +777,15 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     else s"ByteVector($size bytes, #${hashCode})"
 
   def pretty(prefix: String): String = this match {
-    case Append(l,r) => {
-      val psub = prefix + "|  "
-      prefix + "*" + "\n" +
-      l.pretty(psub) + "\n" +
-      r.pretty(psub)
-    }
-    case Chunks(cs) => prefix + "chunks " + size + "\n" +
-                       cs.map(_.pretty(" " + prefix)).mkString("\n")
+    case Append(l,r) =>
+      prefix + "bytes:append\n" +
+      l.pretty(prefix + "  ") + "\n" +
+      r.pretty(prefix + "  ")
+    case Chunks(cs) => prefix + "bytes:chunks " + size + "\n" +
+                       cs.map(_.pretty("  " + prefix)).mkString("\n")
+    case b: Buffer => prefix + "bytes:buffer " + size + "\n" +
+                      b.hd.pretty(prefix + "  ") + "\n"
+                      b.lastBytes.pretty(prefix + "  ")
     case _ => prefix + (if (size < 16) "0x"+toHex else "#"+hashCode)
   }
 
@@ -1255,7 +1257,7 @@ object ByteVector {
       var n = 0; chunks.foreach { bs => n += bs.size } // foldLeft would box/unbox
       n
     }
-    override def ++(b: ByteVector): Chunks = if (b.isEmpty) this else {
+    override def ++(b: ByteVector): ByteVector = if (b.isEmpty) this else {
       var last = b
       var i = chunks.length - 1
       if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
@@ -1287,7 +1289,12 @@ object ByteVector {
         var acc = ByteVector.empty
         while (rem > 0 && remChunks.nonEmpty) {
           val h = remChunks.head
-          acc = acc ++ { if (rem < h.size) h.take(rem) else h }
+          acc = acc ++ {
+            if (rem < h.size)
+              h.take(rem)
+            else
+              h
+            }
           rem -= rem min h.size
           remChunks = remChunks.tail
         }

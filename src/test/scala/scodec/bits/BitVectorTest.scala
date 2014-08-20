@@ -134,11 +134,13 @@ class BitVectorTest extends BitsSuite {
     BitVector.high(12).take(9) shouldBe BitVector.high(9)
     BitVector.high(4).take(100).toByteVector shouldBe ByteVector(0xf0)
     forAll { (x: BitVector, n0: Long, m0: Long) =>
+      (x.depth < 18) shouldBe true
       val m = if (x.nonEmpty) (m0 % x.size).abs else 0
       val n = if (x.nonEmpty) (n0 % x.size).abs else 0
       (x.take(m) ++ x.drop(m)).compact shouldBe x
       x.take(m+n).compact.take(n) shouldBe x.take(n)
       x.drop(m+n).compact shouldBe x.drop(m).compact.drop(n)
+      x.drop(n).take(m) shouldBe x.drop(n).take(m)
       x.drop(n).take(m).toIndexedSeq shouldBe BitVector.bits(x.drop(n).toIndexedSeq).take(m).toIndexedSeq
     }
   }
