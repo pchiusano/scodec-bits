@@ -1264,7 +1264,7 @@ object ByteVector {
         var last = b
         var i = chunks.length - 1
         if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
-          i = chunks.indexWhere(_.size > last.size)
+          i = chunks.lastIndexWhere(_.size > last.size)
           last = Append(Chunks(chunks.drop(i)), last)
           i -= 1
         }
