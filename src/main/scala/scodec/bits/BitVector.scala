@@ -1485,7 +1485,7 @@ object BitVector {
    * stack using `f` if the top element is more than half the size of the
    * element below it.
    */
-  private def reduceBalanced[A](v: TraversableOnce[A])(size: A => Long)(
+  private[bits] def reduceBalanced[A](v: TraversableOnce[A])(size: A => Long)(
                                 f: (A,A) => A): A = {
     @annotation.tailrec
     def fixup(stack: List[(A,Long)]): List[(A,Long)] = stack match {
