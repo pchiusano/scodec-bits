@@ -122,7 +122,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
    */
   def ++(other: ByteVector): ByteVector =
     if (this.isEmpty) other
-    else Chunks(Vector(this)) ++ other
+    else Chunks(Vector(this)).bufferBy(64) ++ other
 
   /**
    * Returns a new vector with the specified byte prepended.
@@ -1252,7 +1252,8 @@ object ByteVector {
     def readResolve: AnyRef = ByteVector.view(bytes)
   }
 
-  private[bits] case class Chunks(chunks: Vector[ByteVector]) extends ByteVector {
+  private[bits] case class Chunks(chunks: Vector[ByteVector])
+  extends ByteVector {
     lazy val size = {
       var n = 0; chunks.foreach { bs => n += bs.size } // foldLeft would box/unbox
       n
@@ -1261,7 +1262,7 @@ object ByteVector {
       if (b.isEmpty) this
       else if (this.isEmpty) b
       else {
-        var last = b
+        var last = b.unbuffer
         var i = chunks.length - 1
         if (i >= 0 && last.size > chunks(i).size*2) { // sizes are way off
           i = chunks.lastIndexWhere(_.size > last.size)
@@ -1402,7 +1403,7 @@ object ByteVector {
 
     def lastBytes = ByteVector.view(lastChunk).take(lastSize)
 
-    override def unbuffer: ByteVector = hd ++ lastBytes
+    override def unbuffer: ByteVector = hd ++ (if (lastSize < 32) lastBytes.copy else lastBytes)
 
     def rebuffer(chunkSize: Int): ByteVector = {
       require (chunkSize > lastChunk.length)
