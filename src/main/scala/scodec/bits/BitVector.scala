@@ -206,7 +206,12 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
    */
   def ++(b2: BitVector): BitVector =
     if (this.isEmpty) b2
-    else Chunks(Vector(this)) ++ b2
+    else this match {
+      case Append(hd, tl: Bytes) =>
+        if (tl.size % 8 == 0) Append(hd, tl ++ b2)
+        else Append(Chunks(Vector(hd, tl)) ++ b2, BitVector.empty)
+      case _ => Append(this, BitVector.empty) ++ b2
+    }
 
   /**
    * Returns a new vector with the specified bit prepended.
