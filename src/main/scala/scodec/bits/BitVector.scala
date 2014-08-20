@@ -950,7 +950,7 @@ sealed trait BitVector extends BitwiseOperations[BitVector, Long] with Serializa
   /**
    * Pretty print this `BitVector`.
    */
-  def internalPretty(prefix: String): String = this match {
+  private[bits] def internalPretty(prefix: String): String = this match {
     case Append(l,r) => prefix + "append\n" +
                         l.internalPretty(prefix + "  ") + "\n" +
                         r.internalPretty(prefix + "  ")
@@ -1417,7 +1417,7 @@ object BitVector {
    * amortized constant time `++` and logarithmic time for all other
    * operations.
    */
-  case class Chunks(chunks: Vector[BitVector]) extends BitVector {
+  private[scodec] case class Chunks(chunks: Vector[BitVector]) extends BitVector {
 
     final def sizeLT(n: Long): Boolean = {
       var sofar = 0L

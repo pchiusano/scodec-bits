@@ -776,7 +776,7 @@ sealed trait ByteVector extends BitwiseOperations[ByteVector,Int] with Serializa
     else if (size < 512) s"ByteVector($size bytes, 0x${toHex})"
     else s"ByteVector($size bytes, #${hashCode})"
 
-  def pretty(prefix: String): String = this match {
+  private[bits] def pretty(prefix: String): String = this match {
     case Append(l,r) =>
       prefix + "bytes:append\n" +
       l.pretty(prefix + "  ") + "\n" +
@@ -1252,7 +1252,7 @@ object ByteVector {
     def readResolve: AnyRef = ByteVector.view(bytes)
   }
 
-  case class Chunks(chunks: Vector[ByteVector]) extends ByteVector {
+  private[bits] case class Chunks(chunks: Vector[ByteVector]) extends ByteVector {
     lazy val size = {
       var n = 0; chunks.foreach { bs => n += bs.size } // foldLeft would box/unbox
       n
